@@ -63,7 +63,9 @@ CREATE TABLE IF NOT EXISTS symbols (
     parameters     TEXT DEFAULT '[]',
     return_type    TEXT,
     decorators     TEXT DEFAULT '[]',
-    parent_id      INTEGER REFERENCES symbols(id)
+    parent_id      INTEGER REFERENCES symbols(id),
+    http_method    TEXT,
+    route          TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_symbols_name ON symbols(name);
@@ -279,8 +281,9 @@ class SQLiteStore:
             INSERT INTO symbols
                 (file_id, name, qualified_name, kind,
                  line_start, line_end, signature, docstring,
-                 parameters, return_type, decorators, parent_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 parameters, return_type, decorators, parent_id,
+                 http_method, route)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 file_id,
@@ -295,6 +298,8 @@ class SQLiteStore:
                 sym.return_type,
                 sym.decorators_json(),
                 parent_id,
+                sym.http_method,
+                sym.route,
             ),
         )
         return cur.lastrowid  # type: ignore[return-value]

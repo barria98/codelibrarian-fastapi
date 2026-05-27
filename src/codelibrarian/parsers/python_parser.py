@@ -14,6 +14,7 @@ from typing import Union
 from codelibrarian.models import GraphEdges, Parameter, ParseResult, Symbol
 from codelibrarian.parsers.base import BaseParser
 
+FASTAPI_HTTP_METHODS = {"get", "post", "put", "delete", "patch", "options", "head"}
 
 _FuncNode = Union[ast.FunctionDef, ast.AsyncFunctionDef]
 
@@ -108,10 +109,23 @@ class _Visitor(ast.NodeVisitor):
         doc = ast.get_docstring(node) or ""
         decs = [_decorator_name(d) for d in node.decorator_list]
 
+        http_method = None
+        route = None
+
+        for d in node.decorator_list:
+            if isinstance(d, ast.Call) and isinstance(d.func, ast.Attribute):
+                attr_name = d.func.attr.lower()
+                if attr_name in FASTAPI_HTTP_METHODS:
+                    kind = "fastapi_endpoint"
+                    http_method = attr_name.upper()
+                    if d.args and isinstance(d.args[0], ast.Constant):
+                        route = str(d.args[0].value)
+                    break
+
         sym = Symbol(
             name=node.name,
             qualified_name=qualified,
-            kind=kind,
+            kind=kind,  # type: ignore[arg-type]
             file_path="",
             line_start=node.lineno,
             line_end=node.end_lineno or node.lineno,
@@ -121,6 +135,8 @@ class _Visitor(ast.NodeVisitor):
             return_type=return_type,
             decorators=decs,
             parent_qualified_name=parent_qn,
+            http_method=http_method,
+            route=route,
         )
         self.symbols.append(sym)
 

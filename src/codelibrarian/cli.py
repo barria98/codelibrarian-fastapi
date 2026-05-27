@@ -244,6 +244,10 @@ def lookup(name: str, path: str | None):
         click.echo(f"Name:      {sym.name}")
         click.echo(f"Qualified: {sym.qualified_name}")
         click.echo(f"Kind:      {sym.kind}")
+        if sym.http_method:
+            click.echo(f"Method:    {sym.http_method}")
+        if sym.route:
+            click.echo(f"Route:     {sym.route}")
         click.echo(f"File:      {sym.relative_path}:{sym.line_start}-{sym.line_end}")
         if sym.signature:
             click.echo(f"Signature: {sym.signature}")

@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from typing import Literal
 
 
-SymbolKind = Literal["function", "method", "class", "module"]
+SymbolKind = Literal["function", "method", "class", "module", "fastapi_endpoint"]
 
 
 @dataclass
@@ -40,6 +40,8 @@ class Symbol:
     return_type: str | None = None
     decorators: list[str] = field(default_factory=list)
     parent_qualified_name: str | None = None  # qualified_name of containing class
+    http_method: str | None = None
+    route: str | None = None
 
     def parameters_json(self) -> str:
         return json.dumps([p.to_dict() for p in self.parameters])
@@ -112,6 +114,8 @@ class SymbolRecord:
     return_type: str | None
     decorators: list[str]
     parent_id: int | None
+    http_method: str | None = None
+    route: str | None = None
 
     @classmethod
     def from_row(cls, row: dict) -> "SymbolRecord":
@@ -133,6 +137,8 @@ class SymbolRecord:
             return_type=row.get("return_type"),
             decorators=json.loads(decs_raw),
             parent_id=row.get("parent_id"),
+            http_method=row.get("http_method"),
+            route=row.get("route"),
         )
 
     def to_dict(self) -> dict:
@@ -150,6 +156,8 @@ class SymbolRecord:
             "parameters": [p.to_dict() for p in self.parameters],
             "return_type": self.return_type,
             "decorators": self.decorators,
+            "http_method": self.http_method,
+            "route": self.route,
         }
 
 
