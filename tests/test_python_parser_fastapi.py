@@ -23,3 +23,13 @@ def test_fastapi_endpoint_detection(fastapi_result):
     assert endpoint.name == "read_item"
     assert endpoint.http_method == "GET"
     assert endpoint.route == "/items/{item_id}"
+
+
+def test_fastapi_call_graph_edge(fastapi_result):
+    calls = fastapi_result.edges.calls
+    # The endpoint should call its own underlying function
+    has_edge = any(
+        caller == "fastapi_sample.read_item" and callee == "read_item"
+        for caller, callee in calls
+    )
+    assert has_edge, "Synthetic call edge for FastAPI endpoint is missing"

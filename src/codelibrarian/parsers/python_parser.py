@@ -150,6 +150,10 @@ class _Visitor(ast.NodeVisitor):
         for callee in call_extractor.calls:
             self.edges.calls.append((qualified, callee))
 
+        # Synthetic edge: make the FastAPI endpoint a caller of its own function
+        if kind == "fastapi_endpoint" and node.name not in call_extractor.calls:
+            self.edges.calls.append((qualified, node.name))
+
         # Visit nested classes/functions without descending into calls again
         for child in ast.iter_child_nodes(node):
             if isinstance(child, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
