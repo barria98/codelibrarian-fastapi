@@ -38,6 +38,20 @@ class _Visitor(ast.NodeVisitor):
         self.symbols: list[Symbol] = []
         self.edges = GraphEdges()
         self._class_stack: list[str] = []  # stack of class qualified names
+        self.router_prefixes: dict[str, str] = {}
+
+    def visit_Assign(self, node: ast.Assign) -> None:
+        if isinstance(node.value, ast.Call):
+            func_name = _expr_to_name(node.value.func)
+            if func_name and func_name.endswith("APIRouter"):
+                for kw in node.value.keywords:
+                    if kw.arg == "prefix" and isinstance(kw.value, ast.Constant):
+                        prefix = str(kw.value.value)
+                        for target in node.targets:
+                            target_name = _expr_to_name(target)
+                            if target_name:
+                                self.router_prefixes[target_name] = prefix
+        self.generic_visit(node)
 
     # ------------------------------------------------------------------ #
     # Imports
@@ -118,8 +132,23 @@ class _Visitor(ast.NodeVisitor):
                 if attr_name in FASTAPI_HTTP_METHODS:
                     kind = "fastapi_endpoint"
                     http_method = attr_name.upper()
+                    
+                    raw_route = ""
                     if d.args and isinstance(d.args[0], ast.Constant):
-                        route = str(d.args[0].value)
+                        raw_route = str(d.args[0].value)
+
+                    router_name = _expr_to_name(d.func.value)
+                    if router_name and router_name in self.router_prefixes:
+                        prefix = self.router_prefixes[router_name]
+                        if prefix.endswith("/") and raw_route.startswith("/"):
+                            route = prefix + raw_route[1:]
+                        elif not prefix.endswith("/") and not raw_route.startswith("/") and raw_route:
+                            route = prefix + "/" + raw_route
+                        else:
+                            route = prefix + raw_route
+                    else:
+                        route = raw_route if raw_route else None
+
                     break
 
         sym = Symbol(
