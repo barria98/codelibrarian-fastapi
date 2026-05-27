@@ -149,8 +149,9 @@ def status(path: str | None):
 @click.option("--semantic-only", is_flag=True)
 @click.option("--text-only", is_flag=True)
 @click.option("--rewrite", "-r", is_flag=True, help="Force LLM query rewriting")
+@click.option("--fastapi-only", is_flag=True, help="Only show FastAPI endpoints")
 @click.option("--path", default=None, help="Project root")
-def search(query: str, limit: int, semantic_only: bool, text_only: bool, rewrite: bool, path: str | None):
+def search(query: str, limit: int, semantic_only: bool, text_only: bool, rewrite: bool, fastapi_only: bool, path: str | None):
     """Search the code index with a natural language or keyword query."""
     root = Path(path).resolve() if path else None
     config = Config.load(root) if root else Config.load_from_cwd()
@@ -192,6 +193,9 @@ def search(query: str, limit: int, semantic_only: bool, text_only: bool, rewrite
             rewrite=rewrite,
         )
 
+    if fastapi_only:
+        results = [r for r in results if r.symbol.kind == "fastapi_endpoint"]
+
     if embedder:
         embedder.close()
 
@@ -202,14 +206,28 @@ def search(query: str, limit: int, semantic_only: bool, text_only: bool, rewrite
         click.echo("No results found.")
         return
 
-    click.echo(f"{'Score':>6}  {'Kind':<8}  {'Symbol':<40}  Location")
-    click.echo("-" * 80)
-    for r in results:
-        sym = r.symbol
-        location = f"{sym.relative_path}:{sym.line_start}"
-        click.echo(
-            f"{r.score:6.3f}  {sym.kind:<8}  {sym.qualified_name:<40}  {location}"
-        )
+    fastapi_results = [r for r in results if r.symbol.kind == "fastapi_endpoint"]
+    other_results = [r for r in results if r.symbol.kind != "fastapi_endpoint"]
+
+    if fastapi_results:
+        click.echo("=== FastAPI Endpoints ===")
+        for r in fastapi_results:
+            sym = r.symbol
+            method = sym.http_method or "UNKNOWN"
+            route = sym.route or "UNKNOWN"
+            click.echo(f"{sym.name:<20}  {method:<6} {route}")
+        if other_results:
+            click.echo()
+
+    if other_results:
+        click.echo(f"{'Score':>6}  {'Kind':<8}  {'Symbol':<40}  Location")
+        click.echo("-" * 80)
+        for r in other_results:
+            sym = r.symbol
+            location = f"{sym.relative_path}:{sym.line_start}"
+            click.echo(
+                f"{r.score:6.3f}  {sym.kind:<8}  {sym.qualified_name:<40}  {location}"
+            )
 
 
 # --------------------------------------------------------------------------- #
@@ -244,10 +262,11 @@ def lookup(name: str, path: str | None):
         click.echo(f"Name:      {sym.name}")
         click.echo(f"Qualified: {sym.qualified_name}")
         click.echo(f"Kind:      {sym.kind}")
-        if sym.http_method:
-            click.echo(f"Method:    {sym.http_method}")
-        if sym.route:
-            click.echo(f"Route:     {sym.route}")
+        if sym.kind == "fastapi_endpoint":
+            if sym.http_method:
+                click.echo(f"Method:    {sym.http_method}")
+            if sym.route:
+                click.echo(f"Route:     {sym.route}")
         click.echo(f"File:      {sym.relative_path}:{sym.line_start}-{sym.line_end}")
         if sym.signature:
             click.echo(f"Signature: {sym.signature}")
