@@ -232,6 +232,22 @@ class TestImportGraph:
         assert "mod_b" in result
         assert "mod_c" in result
 
+    def test_scoped_by_absolute_path(self, store):
+        """Scoping accepts the stored absolute path, not just relative (issue #6)."""
+        self._setup_imports(store)
+        from codelibrarian.diagrams import mermaid_import_graph
+        result = mermaid_import_graph(store, file_path="/a/mod_a.py")
+        assert "mod_a" in result
+        assert "mod_b" in result
+
+    def test_scoped_by_basename(self, store):
+        """Scoping accepts a bare filename (issue #6)."""
+        self._setup_imports(store)
+        from codelibrarian.diagrams import mermaid_import_graph
+        result = mermaid_import_graph(store, file_path="mod_a.py")
+        assert "mod_a" in result
+        assert "mod_b" in result
+
     def test_empty_project_returns_empty(self, store):
         from codelibrarian.diagrams import mermaid_import_graph
         result = mermaid_import_graph(store)

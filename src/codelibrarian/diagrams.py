@@ -136,9 +136,12 @@ def mermaid_import_graph(
     all_edges = store.get_all_import_edges()
 
     if file_path:
+        # Edges are keyed by relative_path; resolve whatever the caller passed
+        # (absolute, CWD-relative, or basename) to that stored form first.
+        scoped = store.resolve_relative_path(file_path) or file_path
         all_edges = [
             (f, t) for f, t in all_edges
-            if f == file_path or t == file_path
+            if f == scoped or t == scoped
         ]
 
     if not all_edges:

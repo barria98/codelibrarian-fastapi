@@ -688,6 +688,42 @@ class SQLiteStore:
             ).fetchall()
         return [(r["caller_qname"], r["callee_qname"]) for r in rows]
 
+    def resolve_relative_path(self, path: str) -> str | None:
+        """Map an arbitrary file path to a stored ``relative_path``.
+
+        Diagram scoping stores edges keyed by ``relative_path``, but callers
+        may pass an absolute path, a path relative to CWD, or just a basename.
+        Tries, in order: exact match on ``relative_path`` or absolute ``path``;
+        the resolved absolute path; then a unique suffix match.
+        """
+        row = self.conn.execute(
+            "SELECT relative_path FROM files WHERE relative_path = ? OR path = ? LIMIT 1",
+            (path, path),
+        ).fetchone()
+        if row:
+            return row["relative_path"]
+
+        try:
+            resolved = str(Path(path).resolve())
+        except OSError:
+            resolved = path
+        row = self.conn.execute(
+            "SELECT relative_path FROM files WHERE path = ? LIMIT 1", (resolved,)
+        ).fetchone()
+        if row:
+            return row["relative_path"]
+
+        # Suffix match (e.g. basename or a trailing path fragment). Prefer the
+        # shortest relative_path so an exact filename wins over a longer path.
+        like = f"%{path}"
+        rows = self.conn.execute(
+            "SELECT relative_path FROM files "
+            "WHERE relative_path LIKE ? OR path LIKE ? "
+            "ORDER BY length(relative_path) LIMIT 1",
+            (like, like),
+        ).fetchone()
+        return rows["relative_path"] if rows else None
+
     def get_all_import_edges(self) -> list[tuple[str, str]]:
         """Return all resolved file-to-file import edges as (from_path, to_path)."""
         rows = self.conn.execute(
