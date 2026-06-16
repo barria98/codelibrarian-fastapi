@@ -272,3 +272,12 @@ class TestSanitizeId:
         id1 = _sanitize_id("foo.bar")
         id2 = _sanitize_id("foo_bar")
         assert id1 != id2
+
+    def test_id_is_stable_across_calls(self):
+        """IDs must be deterministic so diagram output is reproducible (issue #8)."""
+        from codelibrarian.diagrams import _sanitize_id
+        assert _sanitize_id("pkg.mod.Class") == _sanitize_id("pkg.mod.Class")
+        # Known stable value (sha1 prefix) guards against regressing to hash().
+        assert _sanitize_id("foo.bar").endswith(
+            "_" + __import__("hashlib").sha1(b"foo.bar").hexdigest()[:8]
+        )
