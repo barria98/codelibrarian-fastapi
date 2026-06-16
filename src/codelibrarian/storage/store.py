@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from pathlib import Path
 from typing import Iterator
@@ -29,6 +30,15 @@ from codelibrarian.models import (
     Symbol,
     SymbolRecord,
 )
+
+
+def _top_qualifier(qualified_name: str) -> str:
+    """Return the top-level module/namespace of a qualified name.
+
+    Handles both dot (Python/TS/Swift) and ``::`` (Rust) separators, e.g.
+    ``models.Dog.fetch`` -> ``models`` and ``crate::mod::f`` -> ``crate``.
+    """
+    return re.split(r"\.|::", qualified_name, maxsplit=1)[0]
 
 
 # --------------------------------------------------------------------------- #
@@ -507,24 +517,7 @@ class SQLiteStore:
 
     def resolve_graph_edges(self) -> None:
         """Attempt to resolve callee/parent names to known symbol IDs."""
-        # Pass 1: exact match on qualified_name or name
-        self.conn.execute(
-            """
-            UPDATE calls SET callee_id = (
-                SELECT id FROM symbols
-                WHERE qualified_name = calls.callee_name
-                   OR name = calls.callee_name
-                LIMIT 1
-            )
-            WHERE callee_id IS NULL
-            """
-        )
-        # Pass 2: for dotted callee names like "obj.method" or
-        # "self.store.method", try matching the qualified_name suffix.
-        # This resolves attribute-access calls that pass 1 misses because
-        # the variable prefix (e.g. "store.") doesn't appear in either the
-        # symbol name or qualified_name.
-        self._resolve_dotted_calls()
+        self._resolve_calls()
         self.conn.execute(
             """
             UPDATE inherits SET parent_id = (
@@ -548,27 +541,86 @@ class SQLiteStore:
             """
         )
 
-    def _resolve_dotted_calls(self) -> None:
-        """Resolve remaining dotted callee names by last-component matching.
+    def _resolve_calls(self) -> None:
+        """Resolve unresolved call edges to symbol IDs, disambiguating by locality.
 
-        For a callee_name like ``store.upsert_file`` or ``self.conn.commit``,
-        extract the part after the last dot and match it against symbol names.
+        A bare callee name (or the last component of a dotted name like
+        ``store.upsert_file``) can match many symbols. Rather than picking an
+        arbitrary row (the old ``LIMIT 1`` behaviour), score candidates by:
+
+        1. exact ``qualified_name`` match with the callee,
+        2. residing in the same file as the caller,
+        3. sharing the caller's top-level module/qualifier prefix.
+
+        Ties break deterministically (shortest qualified_name, then lowest id)
+        so resolution is reproducible. Calls with no candidate stay unresolved.
         """
         rows = self.conn.execute(
-            "SELECT caller_id, callee_name FROM calls "
-            "WHERE callee_id IS NULL AND callee_name LIKE '%.%'"
+            """
+            SELECT c.caller_id, c.callee_name,
+                   s.file_id AS caller_file_id, s.qualified_name AS caller_qn
+            FROM calls c
+            JOIN symbols s ON c.caller_id = s.id
+            WHERE c.callee_id IS NULL
+            """
         ).fetchall()
+
+        # Cache candidate lists keyed by (callee_name, lookup_key) to avoid
+        # re-querying for repeated callee names.
+        candidate_cache: dict[str, list[sqlite3.Row]] = {}
+
         for row in rows:
-            suffix = row["callee_name"].rsplit(".", 1)[-1]
-            match = self.conn.execute(
-                "SELECT id FROM symbols WHERE name = ? LIMIT 1", (suffix,)
-            ).fetchone()
-            if match:
+            callee_name = row["callee_name"]
+            key = callee_name.rsplit(".", 1)[-1] if "." in callee_name else callee_name
+
+            cache_key = f"{callee_name}\x00{key}"
+            candidates = candidate_cache.get(cache_key)
+            if candidates is None:
+                candidates = self.conn.execute(
+                    """
+                    SELECT id, file_id, qualified_name
+                    FROM symbols
+                    WHERE qualified_name = ? OR name = ?
+                    """,
+                    (callee_name, key),
+                ).fetchall()
+                candidate_cache[cache_key] = candidates
+
+            best = self._best_call_candidate(
+                candidates, callee_name, row["caller_file_id"], row["caller_qn"]
+            )
+            if best is not None:
                 self.conn.execute(
                     "UPDATE calls SET callee_id = ? "
                     "WHERE caller_id = ? AND callee_name = ?",
-                    (match["id"], row["caller_id"], row["callee_name"]),
+                    (best, row["caller_id"], callee_name),
                 )
+
+    @staticmethod
+    def _best_call_candidate(
+        candidates: list[sqlite3.Row],
+        callee_name: str,
+        caller_file_id: int,
+        caller_qn: str | None,
+    ) -> int | None:
+        """Pick the best-scoring candidate symbol id, or None if there are none."""
+        if not candidates:
+            return None
+
+        caller_prefix = _top_qualifier(caller_qn) if caller_qn else None
+
+        def score(cand: sqlite3.Row) -> tuple:
+            s = 0
+            if cand["qualified_name"] == callee_name:
+                s += 100
+            if cand["file_id"] == caller_file_id:
+                s += 10
+            if caller_prefix and _top_qualifier(cand["qualified_name"]) == caller_prefix:
+                s += 5
+            # Sort key: highest score first, then deterministic tie-breaks.
+            return (-s, len(cand["qualified_name"]), cand["id"])
+
+        return min(candidates, key=score)["id"]
 
     def get_callers(self, qualified_name: str, depth: int = 1) -> list[SymbolRecord]:
         """Recursive CTE: find all symbols that (transitively) call this symbol."""

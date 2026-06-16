@@ -211,6 +211,56 @@ def test_call_graph_dotted_callee(store):
     assert any(s.name == "do_work" for s in callees)
 
 
+def test_call_resolution_prefers_same_file(store):
+    """When a name is ambiguous, resolution prefers the caller's own file (issue #10)."""
+    fid1 = store.upsert_file("/a/one.py", "one.py", "python", 1.0, "x")
+    fid2 = store.upsert_file("/a/two.py", "two.py", "python", 1.0, "y")
+
+    caller_id = store.insert_symbol(_make_symbol("caller", "one.caller", "function"), fid1, None)
+    # Two distinct symbols both named "process"
+    local = store.insert_symbol(_make_symbol("process", "one.process", "function"), fid1, None)
+    remote = store.insert_symbol(_make_symbol("process", "two.process", "function"), fid2, None)
+    store.conn.commit()
+
+    store.insert_call(caller_id, "process")
+    store.resolve_graph_edges()
+    store.conn.commit()
+
+    row = store.conn.execute(
+        "SELECT callee_id FROM calls WHERE caller_id = ?", (caller_id,)
+    ).fetchone()
+    assert row["callee_id"] == local
+    assert row["callee_id"] != remote
+
+
+def test_call_resolution_is_deterministic(store):
+    """Ambiguous cross-file resolution must be stable, not arbitrary (issue #10)."""
+    fid1 = store.upsert_file("/a/one.py", "one.py", "python", 1.0, "x")
+    fid2 = store.upsert_file("/a/two.py", "two.py", "python", 1.0, "y")
+    fid3 = store.upsert_file("/a/three.py", "three.py", "python", 1.0, "z")
+
+    caller_id = store.insert_symbol(_make_symbol("entry", "one.entry", "function"), fid1, None)
+    store.insert_symbol(_make_symbol("helper", "two.helper", "function"), fid2, None)
+    store.insert_symbol(_make_symbol("helper", "three.helper", "function"), fid3, None)
+    store.conn.commit()
+
+    store.insert_call(caller_id, "helper")
+    store.resolve_graph_edges()
+    store.conn.commit()
+    first = store.conn.execute(
+        "SELECT callee_id FROM calls WHERE caller_id = ?", (caller_id,)
+    ).fetchone()["callee_id"]
+
+    # Re-resolving must not change the chosen target.
+    store.conn.execute("UPDATE calls SET callee_id = NULL")
+    store.resolve_graph_edges()
+    store.conn.commit()
+    second = store.conn.execute(
+        "SELECT callee_id FROM calls WHERE caller_id = ?", (caller_id,)
+    ).fetchone()["callee_id"]
+    assert first == second
+
+
 def test_call_graph_deeply_dotted_callee(store):
     """Deeply dotted names like 'self.store.method' should also resolve."""
     fid = store.upsert_file("/a/b.py", "b.py", "python", 1.0, "x")
