@@ -92,6 +92,20 @@ def test_delete_file_symbols_cascade(store):
     assert len(store.lookup_symbol("baz")) == 0
 
 
+def test_delete_file_symbols_removes_embeddings(store):
+    """Embeddings for a file's symbols must be deleted when the file is reindexed,
+    otherwise vectors are orphaned or reused for unrelated symbols (issue #4)."""
+    fid = store.upsert_file("/a/b.py", "b.py", "python", 1.0, "x")
+    sym_id = store.insert_symbol(_make_symbol("baz", "module.baz", "function"), fid, None)
+    store.upsert_embedding(sym_id, [0.1, 0.2, 0.3, 0.4])
+    store.conn.commit()
+
+    assert store.symbols_with_embeddings() == {sym_id}
+    store.delete_file_symbols(fid)
+    store.conn.commit()
+    assert store.symbols_with_embeddings() == set()
+
+
 # --------------------------------------------------------------------------- #
 # FTS5
 # --------------------------------------------------------------------------- #

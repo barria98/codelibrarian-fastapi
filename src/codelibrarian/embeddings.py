@@ -40,7 +40,18 @@ class EmbeddingClient:
             data = resp.json()
             # OpenAI format: {"data": [{"embedding": [...], "index": N}]}
             items = sorted(data["data"], key=lambda x: x["index"])
-            return [item["embedding"] for item in items]
+            embeddings = [item["embedding"] for item in items]
+            # Guard against a server returning a different number of vectors
+            # than inputs (or non-contiguous indices). Treat any mismatch as a
+            # failure rather than silently misaligning vectors with symbols.
+            if len(embeddings) != len(truncated):
+                logger.debug(
+                    "Embedding count mismatch: sent %d, got %d",
+                    len(truncated),
+                    len(embeddings),
+                )
+                return None
+            return embeddings
         except Exception as exc:
             logger.debug("Embedding request failed: %s", exc)
             return None

@@ -237,6 +237,15 @@ class SQLiteStore:
 
     def delete_file_symbols(self, file_id: int) -> None:
         self.conn.execute("DELETE FROM imports WHERE from_file_id = ?", (file_id,))
+        # Delete embeddings for this file's symbols. The symbol_embeddings vec0
+        # virtual table does not honour ON DELETE CASCADE, so without this the
+        # vectors are orphaned. Worse, SQLite recycles symbol rowids, so a stale
+        # embedding row could later be reused for an unrelated new symbol.
+        self.conn.execute(
+            "DELETE FROM symbol_embeddings WHERE symbol_id IN "
+            "(SELECT id FROM symbols WHERE file_id = ?)",
+            (file_id,),
+        )
         # Clear resolved FK references from other tables pointing to symbols
         # in this file, so that deleting symbols doesn't violate FKs.
         self.conn.execute(
@@ -444,19 +453,26 @@ class SQLiteStore:
         rows = self.conn.execute("SELECT symbol_id FROM symbol_embeddings").fetchall()
         return {r["symbol_id"] for r in rows}
 
-    def symbols_without_embeddings(self, limit: int = _EMBED_BATCH_CEILING) -> list[tuple[int, str, str]]:
-        """Returns (id, signature, docstring) for symbols lacking embeddings."""
-        rows = self.conn.execute(
-            """
+    def symbols_without_embeddings(
+        self, limit: int | None = _EMBED_BATCH_CEILING
+    ) -> list[tuple[int, str, str]]:
+        """Returns (id, signature, docstring) for symbols lacking embeddings.
+
+        Pass ``limit=None`` to fetch every pending symbol (used by the indexer,
+        which streams the work list in chunks itself).
+        """
+        sql = """
             SELECT s.id, COALESCE(s.signature, '') as signature,
                    COALESCE(s.docstring, '') as docstring
             FROM symbols s
             LEFT JOIN symbol_embeddings e ON s.id = e.symbol_id
             WHERE e.symbol_id IS NULL
-            LIMIT ?
-            """,
-            (limit,),
-        ).fetchall()
+        """
+        params: tuple = ()
+        if limit is not None:
+            sql += " LIMIT ?"
+            params = (limit,)
+        rows = self.conn.execute(sql, params).fetchall()
         return [(r["id"], r["signature"], r["docstring"]) for r in rows]
 
     # ------------------------------------------------------------------ #
