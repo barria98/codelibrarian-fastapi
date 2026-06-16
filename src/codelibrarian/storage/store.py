@@ -656,12 +656,13 @@ class SQLiteStore:
                 SELECT c.callee_id, 1
                 FROM calls c
                 JOIN symbols s ON c.caller_id = s.id
-                WHERE s.qualified_name = ? OR s.name = ?
+                WHERE (s.qualified_name = ? OR s.name = ?)
+                  AND c.callee_id IS NOT NULL
                 UNION
                 SELECT c2.callee_id, ct.depth + 1
                 FROM calls c2
                 JOIN callee_tree ct ON c2.caller_id = ct.id
-                WHERE ct.depth < ?
+                WHERE ct.depth < ? AND c2.callee_id IS NOT NULL
             )
             SELECT DISTINCT s.*, f.path, f.relative_path
             FROM callee_tree ct

@@ -44,6 +44,10 @@ class QueryRewriter:
         timeout: float = 5.0,
     ):
         self.api_url = api_url.rstrip("/")
+        # Accept either a full chat-completions URL or a base URL, mirroring
+        # EmbeddingClient's handling of the /embeddings suffix.
+        if not self.api_url.endswith("/chat/completions"):
+            self.api_url = f"{self.api_url}/chat/completions"
         self.model = model
         self._client = httpx.Client(timeout=timeout)
 
