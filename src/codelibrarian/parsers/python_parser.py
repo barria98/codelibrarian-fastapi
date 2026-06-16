@@ -203,15 +203,23 @@ def _decorator_name(node: ast.expr) -> str:
 
 
 def _extract_params(node: _FuncNode) -> list[Parameter]:
-    """Extract parameter metadata from a function/method AST node."""
+    """Extract parameter metadata from a function/method AST node.
+
+    Parameters are emitted in canonical declaration order:
+    positional-only, positional-or-keyword, ``*vararg``, keyword-only,
+    ``**kwarg``. ``args.defaults`` right-aligns against the *combined*
+    positional list (posonly + args), and keyword-only defaults live in the
+    separate ``kw_defaults`` list (``None`` where a default is absent).
+    """
     params: list[Parameter] = []
     args = node.args
-    defaults = args.defaults
-    num_args = len(args.args)
-    # defaults list is right-aligned against args.args
-    defaults_offset = num_args - len(defaults)
 
-    for i, arg in enumerate(args.args):
+    # Positional-only and positional-or-keyword share one defaults tail.
+    positional = list(args.posonlyargs) + list(args.args)
+    defaults = args.defaults
+    defaults_offset = len(positional) - len(defaults)
+
+    for i, arg in enumerate(positional):
         if arg.arg in ("self", "cls"):
             continue
         type_str = _annotation_to_str(arg.annotation) if arg.annotation else None
@@ -219,19 +227,27 @@ def _extract_params(node: _FuncNode) -> list[Parameter]:
         default_str = ast.unparse(defaults[default_idx]) if default_idx >= 0 else None
         params.append(Parameter(name=arg.arg, type=type_str, default=default_str))
 
-    for arg in args.posonlyargs:
-        type_str = _annotation_to_str(arg.annotation) if arg.annotation else None
-        params.append(Parameter(name=arg.arg, type=type_str))
-
     if args.vararg:
-        params.append(Parameter(name=f"*{args.vararg.arg}"))
+        type_str = (
+            _annotation_to_str(args.vararg.annotation)
+            if args.vararg.annotation
+            else None
+        )
+        params.append(Parameter(name=f"*{args.vararg.arg}", type=type_str))
 
-    for arg in args.kwonlyargs:
+    # Keyword-only defaults are positionally aligned with kwonlyargs.
+    for arg, default in zip(args.kwonlyargs, args.kw_defaults):
         type_str = _annotation_to_str(arg.annotation) if arg.annotation else None
-        params.append(Parameter(name=arg.arg, type=type_str))
+        default_str = ast.unparse(default) if default is not None else None
+        params.append(Parameter(name=arg.arg, type=type_str, default=default_str))
 
     if args.kwarg:
-        params.append(Parameter(name=f"**{args.kwarg.arg}"))
+        type_str = (
+            _annotation_to_str(args.kwarg.annotation)
+            if args.kwarg.annotation
+            else None
+        )
+        params.append(Parameter(name=f"**{args.kwarg.arg}", type=type_str))
 
     return params
 

@@ -92,6 +92,35 @@ def test_delete_file_symbols_cascade(store):
     assert len(store.lookup_symbol("baz")) == 0
 
 
+def test_delete_file_symbols_removes_embeddings(store):
+    """Embeddings for a file's symbols must be deleted when the file is reindexed,
+    otherwise vectors are orphaned or reused for unrelated symbols (issue #4)."""
+    fid = store.upsert_file("/a/b.py", "b.py", "python", 1.0, "x")
+    sym_id = store.insert_symbol(_make_symbol("baz", "module.baz", "function"), fid, None)
+    store.upsert_embedding(sym_id, [0.1, 0.2, 0.3, 0.4])
+    store.conn.commit()
+
+    assert store.symbols_with_embeddings() == {sym_id}
+    store.delete_file_symbols(fid)
+    store.conn.commit()
+    assert store.symbols_with_embeddings() == set()
+
+
+def test_get_symbol_vocabulary_excludes_and_caps(store):
+    """Vocabulary excludes test_/dunder names and is bounded (issue #11)."""
+    fid = store.upsert_file("/a/b.py", "b.py", "python", 1.0, "x")
+    for i in range(20):
+        store.insert_symbol(_make_symbol(f"fn_{i}", f"m.fn_{i}", "function"), fid, None)
+    store.insert_symbol(_make_symbol("test_thing", "m.test_thing", "function"), fid, None)
+    store.insert_symbol(_make_symbol("__init__", "m.C.__init__", "method"), fid, None)
+    store.conn.commit()
+
+    vocab = store.get_symbol_vocabulary(limit=5)
+    assert len(vocab) == 5
+    assert "test_thing" not in vocab
+    assert "__init__" not in vocab
+
+
 # --------------------------------------------------------------------------- #
 # FTS5
 # --------------------------------------------------------------------------- #
@@ -195,6 +224,56 @@ def test_call_graph_dotted_callee(store):
 
     callees = store.get_callees("m.my_func")
     assert any(s.name == "do_work" for s in callees)
+
+
+def test_call_resolution_prefers_same_file(store):
+    """When a name is ambiguous, resolution prefers the caller's own file (issue #10)."""
+    fid1 = store.upsert_file("/a/one.py", "one.py", "python", 1.0, "x")
+    fid2 = store.upsert_file("/a/two.py", "two.py", "python", 1.0, "y")
+
+    caller_id = store.insert_symbol(_make_symbol("caller", "one.caller", "function"), fid1, None)
+    # Two distinct symbols both named "process"
+    local = store.insert_symbol(_make_symbol("process", "one.process", "function"), fid1, None)
+    remote = store.insert_symbol(_make_symbol("process", "two.process", "function"), fid2, None)
+    store.conn.commit()
+
+    store.insert_call(caller_id, "process")
+    store.resolve_graph_edges()
+    store.conn.commit()
+
+    row = store.conn.execute(
+        "SELECT callee_id FROM calls WHERE caller_id = ?", (caller_id,)
+    ).fetchone()
+    assert row["callee_id"] == local
+    assert row["callee_id"] != remote
+
+
+def test_call_resolution_is_deterministic(store):
+    """Ambiguous cross-file resolution must be stable, not arbitrary (issue #10)."""
+    fid1 = store.upsert_file("/a/one.py", "one.py", "python", 1.0, "x")
+    fid2 = store.upsert_file("/a/two.py", "two.py", "python", 1.0, "y")
+    fid3 = store.upsert_file("/a/three.py", "three.py", "python", 1.0, "z")
+
+    caller_id = store.insert_symbol(_make_symbol("entry", "one.entry", "function"), fid1, None)
+    store.insert_symbol(_make_symbol("helper", "two.helper", "function"), fid2, None)
+    store.insert_symbol(_make_symbol("helper", "three.helper", "function"), fid3, None)
+    store.conn.commit()
+
+    store.insert_call(caller_id, "helper")
+    store.resolve_graph_edges()
+    store.conn.commit()
+    first = store.conn.execute(
+        "SELECT callee_id FROM calls WHERE caller_id = ?", (caller_id,)
+    ).fetchone()["callee_id"]
+
+    # Re-resolving must not change the chosen target.
+    store.conn.execute("UPDATE calls SET callee_id = NULL")
+    store.resolve_graph_edges()
+    store.conn.commit()
+    second = store.conn.execute(
+        "SELECT callee_id FROM calls WHERE caller_id = ?", (caller_id,)
+    ).fetchone()["callee_id"]
+    assert first == second
 
 
 def test_call_graph_deeply_dotted_callee(store):

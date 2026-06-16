@@ -239,22 +239,28 @@ class Indexer:
             )
             self.store.conn.commit()
 
+        # Fetch the full pending set once and build a work list of symbols that
+        # actually have embeddable text. We deliberately do NOT re-query inside
+        # the loop: the old approach relied on stored vectors dropping rows out
+        # of the pending query, so any symbol that failed to embed (API error,
+        # empty text) was re-fetched forever — an infinite loop.
+        pending = self.store.symbols_without_embeddings(limit=None)
+        work: list[tuple[int, str]] = []
+        for sym_id, signature, docstring in pending:
+            # Skip symbols with no embeddable text: an empty string is wasted
+            # work and some embedding servers reject empty input outright.
+            text = (f"{signature}\n{docstring}").strip()
+            if text:
+                work.append((sym_id, text))
+
         count = 0
-        batch_num = 0
-        while True:
-            pending = self.store.symbols_without_embeddings(
-                limit=self.config.embedding_batch_size * 4
-            )
-            if not pending:
-                break
+        chunk_size = max(self.config.embedding_batch_size * 4, 1)
+        for batch_num, start in enumerate(range(0, len(work), chunk_size), start=1):
+            chunk = work[start : start + chunk_size]
+            self.progress(f"Embedding batch {batch_num} ({len(chunk)} symbols)")
 
-            batch_num += 1
-            self.progress(f"Embedding batch {batch_num} ({len(pending)} symbols)")
-
-            ids = [row[0] for row in pending]
-            texts = [
-                (f"{row[1]}\n{row[2]}").strip() for row in pending
-            ]
+            ids = [sid for sid, _ in chunk]
+            texts = [text for _, text in chunk]
 
             embeddings = self.embedder.embed_texts(texts)  # type: ignore[union-attr]
             for sym_id, embedding in zip(ids, embeddings):

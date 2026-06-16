@@ -47,13 +47,6 @@ class Symbol:
     def decorators_json(self) -> str:
         return json.dumps(self.decorators)
 
-    def embedding_text(self, max_chars: int = 1600) -> str:
-        """Text to embed: signature + docstring, truncated to max_chars."""
-        text = self.signature
-        if self.docstring:
-            text += "\n" + self.docstring
-        return text[:max_chars]
-
 
 @dataclass
 class GraphEdges:
