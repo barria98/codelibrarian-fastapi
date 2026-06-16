@@ -22,6 +22,8 @@ _LIST_LIMIT: int = 200
 _EMBED_BATCH_CEILING: int = 1000
 #: Maximum recursion depth for ancestor/descendant class-hierarchy CTEs.
 _HIERARCHY_DEPTH: int = 5
+#: Maximum symbol names injected into the LLM query-rewrite vocabulary prompt.
+_VOCABULARY_LIMIT: int = 500
 
 from codelibrarian.models import (
     GraphEdges,
@@ -887,14 +889,23 @@ class SQLiteStore:
     # Stats
     # ------------------------------------------------------------------ #
 
-    def get_symbol_vocabulary(self) -> list[str]:
-        """Return distinct symbol names, excluding test and dunder symbols."""
+    def get_symbol_vocabulary(self, limit: int = _VOCABULARY_LIMIT) -> list[str]:
+        """Return the most common symbol names, excluding test and dunder symbols.
+
+        The result feeds the LLM query-rewrite prompt, so it must stay bounded:
+        injecting every name in a large codebase can overflow the model's
+        context window and blow past the rewrite timeout. Names are ranked by
+        frequency (how many symbols share the name) so the most representative
+        identifiers are kept when truncating to *limit*.
+        """
         rows = self.conn.execute(
-            "SELECT DISTINCT name FROM symbols "
+            "SELECT name, COUNT(*) AS freq FROM symbols "
             "WHERE name NOT LIKE 'test_%' "
-            "ORDER BY name"
+            "GROUP BY name "
+            "ORDER BY freq DESC, name"
         ).fetchall()
-        return [r["name"] for r in rows if not r["name"].startswith("__")]
+        vocab = [r["name"] for r in rows if not r["name"].startswith("__")]
+        return vocab[:limit]
 
     def stats(self) -> dict:
         counts = {}

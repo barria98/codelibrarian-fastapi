@@ -106,6 +106,21 @@ def test_delete_file_symbols_removes_embeddings(store):
     assert store.symbols_with_embeddings() == set()
 
 
+def test_get_symbol_vocabulary_excludes_and_caps(store):
+    """Vocabulary excludes test_/dunder names and is bounded (issue #11)."""
+    fid = store.upsert_file("/a/b.py", "b.py", "python", 1.0, "x")
+    for i in range(20):
+        store.insert_symbol(_make_symbol(f"fn_{i}", f"m.fn_{i}", "function"), fid, None)
+    store.insert_symbol(_make_symbol("test_thing", "m.test_thing", "function"), fid, None)
+    store.insert_symbol(_make_symbol("__init__", "m.C.__init__", "method"), fid, None)
+    store.conn.commit()
+
+    vocab = store.get_symbol_vocabulary(limit=5)
+    assert len(vocab) == 5
+    assert "test_thing" not in vocab
+    assert "__init__" not in vocab
+
+
 # --------------------------------------------------------------------------- #
 # FTS5
 # --------------------------------------------------------------------------- #
