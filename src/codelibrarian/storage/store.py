@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from pathlib import Path
 from typing import Iterator
@@ -21,6 +22,8 @@ _LIST_LIMIT: int = 200
 _EMBED_BATCH_CEILING: int = 1000
 #: Maximum recursion depth for ancestor/descendant class-hierarchy CTEs.
 _HIERARCHY_DEPTH: int = 5
+#: Maximum symbol names injected into the LLM query-rewrite vocabulary prompt.
+_VOCABULARY_LIMIT: int = 500
 
 from codelibrarian.models import (
     GraphEdges,
@@ -29,6 +32,15 @@ from codelibrarian.models import (
     Symbol,
     SymbolRecord,
 )
+
+
+def _top_qualifier(qualified_name: str) -> str:
+    """Return the top-level module/namespace of a qualified name.
+
+    Handles both dot (Python/TS/Swift) and ``::`` (Rust) separators, e.g.
+    ``models.Dog.fetch`` -> ``models`` and ``crate::mod::f`` -> ``crate``.
+    """
+    return re.split(r"\.|::", qualified_name, maxsplit=1)[0]
 
 
 # --------------------------------------------------------------------------- #
@@ -239,6 +251,15 @@ class SQLiteStore:
 
     def delete_file_symbols(self, file_id: int) -> None:
         self.conn.execute("DELETE FROM imports WHERE from_file_id = ?", (file_id,))
+        # Delete embeddings for this file's symbols. The symbol_embeddings vec0
+        # virtual table does not honour ON DELETE CASCADE, so without this the
+        # vectors are orphaned. Worse, SQLite recycles symbol rowids, so a stale
+        # embedding row could later be reused for an unrelated new symbol.
+        self.conn.execute(
+            "DELETE FROM symbol_embeddings WHERE symbol_id IN "
+            "(SELECT id FROM symbols WHERE file_id = ?)",
+            (file_id,),
+        )
         # Clear resolved FK references from other tables pointing to symbols
         # in this file, so that deleting symbols doesn't violate FKs.
         self.conn.execute(
@@ -449,19 +470,26 @@ class SQLiteStore:
         rows = self.conn.execute("SELECT symbol_id FROM symbol_embeddings").fetchall()
         return {r["symbol_id"] for r in rows}
 
-    def symbols_without_embeddings(self, limit: int = _EMBED_BATCH_CEILING) -> list[tuple[int, str, str]]:
-        """Returns (id, signature, docstring) for symbols lacking embeddings."""
-        rows = self.conn.execute(
-            """
+    def symbols_without_embeddings(
+        self, limit: int | None = _EMBED_BATCH_CEILING
+    ) -> list[tuple[int, str, str]]:
+        """Returns (id, signature, docstring) for symbols lacking embeddings.
+
+        Pass ``limit=None`` to fetch every pending symbol (used by the indexer,
+        which streams the work list in chunks itself).
+        """
+        sql = """
             SELECT s.id, COALESCE(s.signature, '') as signature,
                    COALESCE(s.docstring, '') as docstring
             FROM symbols s
             LEFT JOIN symbol_embeddings e ON s.id = e.symbol_id
             WHERE e.symbol_id IS NULL
-            LIMIT ?
-            """,
-            (limit,),
-        ).fetchall()
+        """
+        params: tuple = ()
+        if limit is not None:
+            sql += " LIMIT ?"
+            params = (limit,)
+        rows = self.conn.execute(sql, params).fetchall()
         return [(r["id"], r["signature"], r["docstring"]) for r in rows]
 
     # ------------------------------------------------------------------ #
@@ -496,24 +524,7 @@ class SQLiteStore:
 
     def resolve_graph_edges(self) -> None:
         """Attempt to resolve callee/parent names to known symbol IDs."""
-        # Pass 1: exact match on qualified_name or name
-        self.conn.execute(
-            """
-            UPDATE calls SET callee_id = (
-                SELECT id FROM symbols
-                WHERE qualified_name = calls.callee_name
-                   OR name = calls.callee_name
-                LIMIT 1
-            )
-            WHERE callee_id IS NULL
-            """
-        )
-        # Pass 2: for dotted callee names like "obj.method" or
-        # "self.store.method", try matching the qualified_name suffix.
-        # This resolves attribute-access calls that pass 1 misses because
-        # the variable prefix (e.g. "store.") doesn't appear in either the
-        # symbol name or qualified_name.
-        self._resolve_dotted_calls()
+        self._resolve_calls()
         self.conn.execute(
             """
             UPDATE inherits SET parent_id = (
@@ -537,27 +548,86 @@ class SQLiteStore:
             """
         )
 
-    def _resolve_dotted_calls(self) -> None:
-        """Resolve remaining dotted callee names by last-component matching.
+    def _resolve_calls(self) -> None:
+        """Resolve unresolved call edges to symbol IDs, disambiguating by locality.
 
-        For a callee_name like ``store.upsert_file`` or ``self.conn.commit``,
-        extract the part after the last dot and match it against symbol names.
+        A bare callee name (or the last component of a dotted name like
+        ``store.upsert_file``) can match many symbols. Rather than picking an
+        arbitrary row (the old ``LIMIT 1`` behaviour), score candidates by:
+
+        1. exact ``qualified_name`` match with the callee,
+        2. residing in the same file as the caller,
+        3. sharing the caller's top-level module/qualifier prefix.
+
+        Ties break deterministically (shortest qualified_name, then lowest id)
+        so resolution is reproducible. Calls with no candidate stay unresolved.
         """
         rows = self.conn.execute(
-            "SELECT caller_id, callee_name FROM calls "
-            "WHERE callee_id IS NULL AND callee_name LIKE '%.%'"
+            """
+            SELECT c.caller_id, c.callee_name,
+                   s.file_id AS caller_file_id, s.qualified_name AS caller_qn
+            FROM calls c
+            JOIN symbols s ON c.caller_id = s.id
+            WHERE c.callee_id IS NULL
+            """
         ).fetchall()
+
+        # Cache candidate lists keyed by (callee_name, lookup_key) to avoid
+        # re-querying for repeated callee names.
+        candidate_cache: dict[str, list[sqlite3.Row]] = {}
+
         for row in rows:
-            suffix = row["callee_name"].rsplit(".", 1)[-1]
-            match = self.conn.execute(
-                "SELECT id FROM symbols WHERE name = ? LIMIT 1", (suffix,)
-            ).fetchone()
-            if match:
+            callee_name = row["callee_name"]
+            key = callee_name.rsplit(".", 1)[-1] if "." in callee_name else callee_name
+
+            cache_key = f"{callee_name}\x00{key}"
+            candidates = candidate_cache.get(cache_key)
+            if candidates is None:
+                candidates = self.conn.execute(
+                    """
+                    SELECT id, file_id, qualified_name
+                    FROM symbols
+                    WHERE qualified_name = ? OR name = ?
+                    """,
+                    (callee_name, key),
+                ).fetchall()
+                candidate_cache[cache_key] = candidates
+
+            best = self._best_call_candidate(
+                candidates, callee_name, row["caller_file_id"], row["caller_qn"]
+            )
+            if best is not None:
                 self.conn.execute(
                     "UPDATE calls SET callee_id = ? "
                     "WHERE caller_id = ? AND callee_name = ?",
-                    (match["id"], row["caller_id"], row["callee_name"]),
+                    (best, row["caller_id"], callee_name),
                 )
+
+    @staticmethod
+    def _best_call_candidate(
+        candidates: list[sqlite3.Row],
+        callee_name: str,
+        caller_file_id: int,
+        caller_qn: str | None,
+    ) -> int | None:
+        """Pick the best-scoring candidate symbol id, or None if there are none."""
+        if not candidates:
+            return None
+
+        caller_prefix = _top_qualifier(caller_qn) if caller_qn else None
+
+        def score(cand: sqlite3.Row) -> tuple:
+            s = 0
+            if cand["qualified_name"] == callee_name:
+                s += 100
+            if cand["file_id"] == caller_file_id:
+                s += 10
+            if caller_prefix and _top_qualifier(cand["qualified_name"]) == caller_prefix:
+                s += 5
+            # Sort key: highest score first, then deterministic tie-breaks.
+            return (-s, len(cand["qualified_name"]), cand["id"])
+
+        return min(candidates, key=score)["id"]
 
     def get_callers(self, qualified_name: str, depth: int = 1) -> list[SymbolRecord]:
         """Recursive CTE: find all symbols that (transitively) call this symbol."""
@@ -591,12 +661,13 @@ class SQLiteStore:
                 SELECT c.callee_id, 1
                 FROM calls c
                 JOIN symbols s ON c.caller_id = s.id
-                WHERE s.qualified_name = ? OR s.name = ?
+                WHERE (s.qualified_name = ? OR s.name = ?)
+                  AND c.callee_id IS NOT NULL
                 UNION
                 SELECT c2.callee_id, ct.depth + 1
                 FROM calls c2
                 JOIN callee_tree ct ON c2.caller_id = ct.id
-                WHERE ct.depth < ?
+                WHERE ct.depth < ? AND c2.callee_id IS NOT NULL
             )
             SELECT DISTINCT s.*, f.path, f.relative_path
             FROM callee_tree ct
@@ -676,6 +747,42 @@ class SQLiteStore:
                 (qualified_name, qualified_name, depth),
             ).fetchall()
         return [(r["caller_qname"], r["callee_qname"]) for r in rows]
+
+    def resolve_relative_path(self, path: str) -> str | None:
+        """Map an arbitrary file path to a stored ``relative_path``.
+
+        Diagram scoping stores edges keyed by ``relative_path``, but callers
+        may pass an absolute path, a path relative to CWD, or just a basename.
+        Tries, in order: exact match on ``relative_path`` or absolute ``path``;
+        the resolved absolute path; then a unique suffix match.
+        """
+        row = self.conn.execute(
+            "SELECT relative_path FROM files WHERE relative_path = ? OR path = ? LIMIT 1",
+            (path, path),
+        ).fetchone()
+        if row:
+            return row["relative_path"]
+
+        try:
+            resolved = str(Path(path).resolve())
+        except OSError:
+            resolved = path
+        row = self.conn.execute(
+            "SELECT relative_path FROM files WHERE path = ? LIMIT 1", (resolved,)
+        ).fetchone()
+        if row:
+            return row["relative_path"]
+
+        # Suffix match (e.g. basename or a trailing path fragment). Prefer the
+        # shortest relative_path so an exact filename wins over a longer path.
+        like = f"%{path}"
+        rows = self.conn.execute(
+            "SELECT relative_path FROM files "
+            "WHERE relative_path LIKE ? OR path LIKE ? "
+            "ORDER BY length(relative_path) LIMIT 1",
+            (like, like),
+        ).fetchone()
+        return rows["relative_path"] if rows else None
 
     def get_all_import_edges(self) -> list[tuple[str, str]]:
         """Return all resolved file-to-file import edges as (from_path, to_path)."""
@@ -788,14 +895,23 @@ class SQLiteStore:
     # Stats
     # ------------------------------------------------------------------ #
 
-    def get_symbol_vocabulary(self) -> list[str]:
-        """Return distinct symbol names, excluding test and dunder symbols."""
+    def get_symbol_vocabulary(self, limit: int = _VOCABULARY_LIMIT) -> list[str]:
+        """Return the most common symbol names, excluding test and dunder symbols.
+
+        The result feeds the LLM query-rewrite prompt, so it must stay bounded:
+        injecting every name in a large codebase can overflow the model's
+        context window and blow past the rewrite timeout. Names are ranked by
+        frequency (how many symbols share the name) so the most representative
+        identifiers are kept when truncating to *limit*.
+        """
         rows = self.conn.execute(
-            "SELECT DISTINCT name FROM symbols "
+            "SELECT name, COUNT(*) AS freq FROM symbols "
             "WHERE name NOT LIKE 'test_%' "
-            "ORDER BY name"
+            "GROUP BY name "
+            "ORDER BY freq DESC, name"
         ).fetchall()
-        return [r["name"] for r in rows if not r["name"].startswith("__")]
+        vocab = [r["name"] for r in rows if not r["name"].startswith("__")]
+        return vocab[:limit]
 
     def stats(self) -> dict:
         counts = {}
