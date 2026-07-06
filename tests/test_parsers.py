@@ -69,6 +69,38 @@ def test_python_parameters(py_result):
     assert "item" in param_names
 
 
+def test_python_param_kinds_order_and_defaults():
+    """Positional-only ordering and keyword-only defaults (issue #7)."""
+    src = (
+        "def f(a, b, /, c, d=1, *args, e, g=2, **kw):\n"
+        "    pass\n"
+    )
+    parser = PythonParser()
+    result = parser.parse(Path("mod.py"), src, "mod")
+    fn = next(s for s in result.symbols if s.name == "f")
+
+    by_name = {p.name: p for p in fn.parameters}
+    names = [p.name for p in fn.parameters]
+    # Canonical order: posonly, pos-or-kw, *args, kw-only, **kw
+    assert names == ["a", "b", "c", "d", "*args", "e", "g", "**kw"]
+    # positional default attaches to the right parameter
+    assert by_name["d"].default == "1"
+    assert by_name["c"].default is None
+    # keyword-only defaults are captured (previously dropped)
+    assert by_name["g"].default == "2"
+    assert by_name["e"].default is None
+
+
+def test_python_posonly_default_alignment():
+    """A default on a positional-only param must not shift onto another (issue #7)."""
+    parser = PythonParser()
+    result = parser.parse(Path("mod.py"), "def g(x, y=5, /):\n    pass\n", "mod")
+    fn = next(s for s in result.symbols if s.name == "g")
+    by_name = {p.name: p for p in fn.parameters}
+    assert by_name["x"].default is None
+    assert by_name["y"].default == "5"
+
+
 def test_python_return_type(py_result):
     fetch = next(s for s in py_result.symbols if s.qualified_name == "models.Dog.fetch")
     assert fetch.return_type == "str"

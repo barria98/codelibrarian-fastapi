@@ -42,6 +42,56 @@ def config_and_store(tmp_path):
     return config, store
 
 
+class _FailingEmbedder:
+    """Embedder stub whose batches always fail (returns None per item)."""
+
+    def __init__(self):
+        self.calls = 0
+
+    def embed_texts(self, texts):
+        self.calls += 1
+        return [None] * len(texts)
+
+
+class _OkEmbedder:
+    """Embedder stub returning a fixed-dimension vector per non-empty text."""
+
+    def __init__(self, dim=4):
+        self.dim = dim
+        self.seen_texts: list[str] = []
+
+    def embed_texts(self, texts):
+        self.seen_texts.extend(texts)
+        return [[0.1] * self.dim for _ in texts]
+
+
+def test_embed_pending_terminates_on_persistent_failure(config_and_store):
+    """A consistently-failing embedder must not loop forever (issue #3)."""
+    config, store = config_and_store
+    config._data["embeddings"]["enabled"] = True
+    embedder = _FailingEmbedder()
+    indexer = Indexer(store, config, embedder=embedder)
+
+    stats = indexer.index_root()  # must return rather than hang
+
+    assert stats.embeddings_added == 0
+    assert embedder.calls >= 1
+    store.close()
+
+
+def test_embed_pending_skips_empty_text(config_and_store):
+    """Symbols with no signature/docstring text are not sent to the embedder (issue #3)."""
+    config, store = config_and_store
+    config._data["embeddings"]["enabled"] = True
+    embedder = _OkEmbedder(dim=4)
+    indexer = Indexer(store, config, embedder=embedder)
+
+    indexer.index_root()
+
+    assert all(t.strip() for t in embedder.seen_texts)
+    store.close()
+
+
 def test_indexer_finds_symbols(config_and_store):
     config, store = config_and_store
     indexer = Indexer(store, config)

@@ -192,6 +192,18 @@ class TestRewrite:
         assert "Available symbols" not in system_msg
 
 
+class TestApiUrl:
+    def test_appends_chat_completions_to_base_url(self):
+        rw = QueryRewriter(api_url="http://localhost:11434/v1", model="m")
+        assert rw.api_url == "http://localhost:11434/v1/chat/completions"
+
+    def test_leaves_full_url_unchanged(self):
+        rw = QueryRewriter(
+            api_url="http://localhost:11434/v1/chat/completions/", model="m"
+        )
+        assert rw.api_url == "http://localhost:11434/v1/chat/completions"
+
+
 class TestContextManager:
     def test_enters_and_exits(self):
         rw = QueryRewriter(

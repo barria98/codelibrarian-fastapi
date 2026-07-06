@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
 from collections import defaultdict
 
@@ -15,11 +16,14 @@ def _sanitize_id(name: str) -> str:
     produce distinct IDs (``foo_bar`` vs ``foo__bar`` after prefix).
     A short hash suffix is appended to avoid collisions from different
     separator-replacement patterns.
+
+    The suffix uses a stable hash (not Python's salted ``hash()``) so the
+    same input always yields the same node ID across runs/processes.
     """
     base = re.sub(r"[^a-zA-Z0-9_]", "_", name)
-    # Append a short hash of the original name to disambiguate collisions
-    # (e.g. "foo.bar" -> "foo_bar" vs "foo_bar" -> "foo_bar")
-    h = format(hash(name) & 0xFFFF, "04x")
+    # Append a short stable hash of the original name to disambiguate
+    # collisions (e.g. "foo.bar" -> "foo_bar" vs "foo_bar" -> "foo_bar").
+    h = hashlib.sha1(name.encode("utf-8")).hexdigest()[:8]
     return f"{base}_{h}"
 
 
@@ -136,9 +140,12 @@ def mermaid_import_graph(
     all_edges = store.get_all_import_edges()
 
     if file_path:
+        # Edges are keyed by relative_path; resolve whatever the caller passed
+        # (absolute, CWD-relative, or basename) to that stored form first.
+        scoped = store.resolve_relative_path(file_path) or file_path
         all_edges = [
             (f, t) for f, t in all_edges
-            if f == file_path or t == file_path
+            if f == scoped or t == scoped
         ]
 
     if not all_edges:

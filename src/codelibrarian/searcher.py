@@ -356,12 +356,9 @@ def _should_rewrite(query: str) -> bool:
 
     non_stop = [t for t in tokens if t.lower() not in _STOP_WORDS]
 
-    # Too few meaningful tokens: probably a keyword search
+    # Too few meaningful tokens: treat as a keyword search, not natural
+    # language — not enough signal to justify an LLM round-trip.
     if len(non_stop) < 3:
-        # Unless any remaining token is snake_case
-        if any(_SNAKE_CASE_RE.match(t) for t in non_stop):
-            return False
-        # Short queries without code patterns — still not enough signal
         return False
 
     # Any token is snake_case: code-like

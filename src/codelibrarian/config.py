@@ -163,12 +163,24 @@ class Config:
         return self._data.get("query_rewrite", {}).get("timeout", 5.0)
 
     def is_excluded(self, path: Path) -> bool:
-        path_str = str(path)
+        parts = path.parts
+        name = path.name
+        posix = path.as_posix()
         for pattern in self.exclude_patterns:
-            if fnmatch.fnmatch(path_str, f"*{pattern}*"):
-                return True
-            if fnmatch.fnmatch(path.name, pattern):
-                return True
+            if pattern.endswith("/"):
+                # Directory pattern: match a whole path component, not a
+                # substring (so "build/" excludes a "build" dir but not
+                # "rebuild/"). fnmatch on each component allows globs.
+                dir_pat = pattern.rstrip("/")
+                if any(fnmatch.fnmatch(part, dir_pat) for part in parts):
+                    return True
+            else:
+                # Glob pattern: match the basename (e.g. "*.min.js"). If the
+                # pattern itself contains a slash, also match the full path.
+                if fnmatch.fnmatch(name, pattern):
+                    return True
+                if "/" in pattern and fnmatch.fnmatch(posix, f"*{pattern}*"):
+                    return True
         return False
 
     def language_for_file(self, path: Path) -> str | None:
