@@ -458,9 +458,8 @@ class SQLiteStore:
             """
             SELECT symbol_id, distance
             FROM symbol_embeddings
-            WHERE embedding MATCH ?
+            WHERE embedding MATCH ? AND k = ?
             ORDER BY distance
-            LIMIT ?
             """,
             (sqlite_vec.serialize_float32(query_embedding), limit),
         ).fetchall()
